@@ -1,0 +1,44 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Video",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/echonet/utils/video.py",
+      "console": "integratedTerminal",
+      "args": ["--batch_size",
+        "4","--output",
+        "G:/My Drive/EchoNet/output_Video/","--num_workers","2"]
+    },
+
+    {
+      "name": "Python: Segmentation",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/echonet/utils/segmentation.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--save_video",
+        "--output",
+        "G:/My Drive/EchoNet/output_20peak/",
+        "--num_workers",
+        "0",
+        // "--only_peaks"
+      ]
+    },
+    {
+      "name": "Python: Measurements",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/echonet/utils/measurements.py",
+      "console": "integratedTerminal",
+      "args": [ "--data_dir", "G:/My Drive/EchoNet/",
+        "--set_type","train", "--output_dir",
+        "G:/My Drive/EchoNet/output_predict/"]
+    },
+  ]
+}

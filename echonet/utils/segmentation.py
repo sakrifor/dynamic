@@ -8,12 +8,18 @@ import click
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.signal
+import scipy.spatial
 import skimage.draw
+import skimage.segmentation
+import skimage.measure
+import skimage.morphology
 import torch
 import torchvision
 import tqdm
 
 import echonet
+
+from measurements import compute_measurements
 
 
 @click.command("segmentation")
@@ -36,6 +42,7 @@ import echonet
 @click.option("--batch_size", type=int, default=20)
 @click.option("--device", type=str, default=None)
 @click.option("--seed", type=int, default=0)
+@click.option("--only_peaks", is_flag=True)
 def run(
     data_dir=None,
     output=None,
@@ -55,6 +62,7 @@ def run(
     batch_size=20,
     device=None,
     seed=0,
+    only_peaks=False,
 ):
     """Trains/tests segmentation model.
 
@@ -213,6 +221,7 @@ def run(
         if run_test:
             # Run on validation and test
             for split in ["val", "test"]:
+            # for split in ['train']:
                 dataset = echonet.datasets.Echo(root=data_dir, split=split, **kwargs)
                 dataloader = torch.utils.data.DataLoader(dataset,
                                                          batch_size=batch_size, num_workers=num_workers, shuffle=False, pin_memory=(device.type == "cuda"))
@@ -232,7 +241,7 @@ def run(
                 f.flush()
 
     # Saving videos with segmentations
-    dataset = echonet.datasets.Echo(root=data_dir, split="test",
+    dataset = echonet.datasets.Echo(root=data_dir, split="test", # test
                                     target_type=["Filename", "LargeIndex", "SmallIndex"],  # Need filename for saving, and human-selected frames to annotate
                                     mean=mean, std=std,  # Normalization
                                     length=None, max_length=None, period=1  # Take all frames
@@ -250,16 +259,24 @@ def run(
         echonet.utils.latexify()
 
         with torch.no_grad():
-            with open(os.path.join(output, "size.csv"), "w") as g:
-                g.write("Filename,Frame,Size,HumanLarge,HumanSmall,ComputerSmall\n")
+            with open(os.path.join(output, "size.csv"), "a") as g:
+                g.write("Filename,Frame,Size,Perimeter,HumanLarge,HumanSmall,ComputerSmall,ComputerLarge,LongAxis,ShortAxis1,ShortAxis2,TopX,TopY,BottomX,BottomY,LeftX,LeftY,RightX,RightY,LTop,LBottom,LLeft,LRight,Centroid,Boundaries\n")
                 for (x, (filenames, large_index, small_index), length) in tqdm.tqdm(dataloader):
                     # Run segmentation model on blocks of frames one-by-one
                     # The whole concatenated video may be too long to run together
+                    video_flag = False
+                    for (i, (filename, offset)) in enumerate(zip(filenames, length)):
+                        if not os.path.exists(output + "videos/" + filename):
+                            video_flag = True
+                    if not video_flag:
+                        continue
                     y = np.concatenate([model(x[i:(i + batch_size), :, :, :].to(device))["out"].detach().cpu().numpy() for i in range(0, x.shape[0], batch_size)])
 
                     start = 0
                     x = x.numpy()
                     for (i, (filename, offset)) in enumerate(zip(filenames, length)):
+                        if os.path.exists(output + "videos/" + filename):
+                            continue
                         # Extract one video and segmentation predictions
                         video = x[start:(start + offset), ...]
                         logit = y[start:(start + offset), 0, :, :]
@@ -272,16 +289,6 @@ def run(
                         f, c, h, w = video.shape  # pylint: disable=W0612
                         assert c == 3
 
-                        # Put two copies of the video side by side
-                        video = np.concatenate((video, video), 3)
-
-                        # If a pixel is in the segmentation, saturate blue channel
-                        # Leave alone otherwise
-                        video[:, 0, :, w:] = np.maximum(255. * (logit > 0), video[:, 0, :, w:])  # pylint: disable=E1111
-
-                        # Add blank canvas under pair of videos
-                        video = np.concatenate((video, np.zeros_like(video)), 2)
-
                         # Compute size of segmentation per frame
                         size = (logit > 0).sum((1, 2))
 
@@ -290,24 +297,100 @@ def run(
                         trim_max = sorted(size)[round(len(size) ** 0.95)]
                         trim_range = trim_max - trim_min
                         systole = set(scipy.signal.find_peaks(-size, distance=20, prominence=(0.50 * trim_range))[0])
+                        diastole = set(scipy.signal.find_peaks(size, distance=20, prominence=(0.50 * trim_range))[0])
+                        # all_peaks = systole.union(diastole)
+                        # all_peaks = sorted(all_peaks)
+                        # mid_points = []
+                        # for  i in range(1,len(all_peaks)):
+                        #     first_peak = all_peaks[i-1]
+                        #     second_peak = all_peaks[i]
+                        #     min_peak = min(size[first_peak],size[second_peak])
+                        #     max_peak = max(size[first_peak],size[second_peak])
+                        #     mid_size = min_peak + ((max_peak -  min_peak) / 2)
+                        #     absolute_val_array = np.abs(size[first_peak : second_peak] - mid_size)
+                        #     mid_points.append(first_peak + absolute_val_array.argmin())
+                            
+                        frame_numbers = range(0,len(size))
+
+                        if only_peaks:
+                            new_video = []
+                            new_logit = []
+                            new_size = []
+                            frame_numbers = []
+                            for (f,v) in enumerate(video):
+                                if f in systole or f in diastole or f in mid_points:
+                                    new_video.append(v)
+                                    new_logit.append(logit[f])
+                                    new_size.append(size[f])
+                                    frame_numbers.append(f)
+                            if len(new_video) < 2:
+                                max_index = size.argmax()
+                                min_index = size.argmin()
+                                new_video.append(video[max_index])
+                                new_video.append(video[min_index])
+                                new_logit.append(logit[max_index])
+                                new_logit.append(logit[min_index])
+                                new_size.append(size[max_index])
+                                new_size.append(size[min_index])
+                                frame_numbers.append(max_index)
+                                frame_numbers.append(min_index)
+
+                            video = np.array(new_video)
+                            logit = np.array(new_logit)
+                            size = np.array(new_size)
+                        
+                        
+                        # Put two copies of the video side by side
+                        video = np.concatenate((video, video, video), 3)
+
+                        # If a pixel is in the segmentation, saturate blue channel
+                        # Leave alone otherwise
+                        video[:, 0, :, w:2*w] = np.maximum(255. * (logit > 0), video[:, 0, :, w:2*w])  # pylint: disable=E1111
+
+                        video, measurements = compute_measurements(logit,video,w)
+
+                        velocities = measurements['velocities']
+                        longest_axis_size = measurements['longest_axis_size'] 
+                        short_axis_1_size  = measurements['short_axis_1_size']
+                        short_axis_2_size = measurements['short_axis_2_size']
+
+                        # Draw perimeter
+                        video[:, 1, :, 2*w:] = np.maximum(255. * measurements['boundary'], video[:, 0, :, 2*w:])  # pylint: disable=E1111
+
+                        # Add blank canvas under pair of videos
+                        video = np.concatenate((video, np.zeros_like(video)), 2)
+
+                        
 
                         # Write sizes and frames to file
                         for (frame, s) in enumerate(size):
-                            g.write("{},{},{},{},{},{}\n".format(filename, frame, s, 1 if frame == large_index[i] else 0, 1 if frame == small_index[i] else 0, 1 if frame in systole else 0))
+                            p = measurements['perimeters'][frame]
+                            g.write("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n".format(filename, frame_numbers[frame], s, p, 1 if frame_numbers[frame] ==
+                                    large_index[i] else 0, 1 if frame_numbers[frame] == small_index[i] else 0, 1 if frame_numbers[frame] in systole else 0,1 if frame_numbers[frame] in diastole else 0, 
+                                    longest_axis_size[frame], 
+                                    short_axis_1_size[frame], 
+                                    short_axis_2_size[frame],
+                                    velocities['topX'][frame],velocities['topY'][frame],
+                                    velocities['bottomX'][frame],velocities['bottomY'][frame],
+                                    velocities['leftX'][frame],velocities['leftY'][frame],
+                                    velocities['rightX'][frame],velocities['rightY'][frame],
+                                    velocities['lengthTop'][frame],velocities['lengthBottom'][frame],
+                                    velocities['lengthLeft'][frame],velocities['lengthRight'][frame],
+                                    measurements['centroid'][frame],measurements['boundary_coordinates'][frame].tolist()))
 
                         # Plot sizes
-                        fig = plt.figure(figsize=(size.shape[0] / 50 * 1.5, 3))
-                        plt.scatter(np.arange(size.shape[0]) / 50, size, s=1)
-                        ylim = plt.ylim()
-                        for s in systole:
-                            plt.plot(np.array([s, s]) / 50, ylim, linewidth=1)
-                        plt.ylim(ylim)
-                        plt.title(os.path.splitext(filename)[0])
-                        plt.xlabel("Seconds")
-                        plt.ylabel("Size (pixels)")
-                        plt.tight_layout()
-                        plt.savefig(os.path.join(output, "size", os.path.splitext(filename)[0] + ".pdf"))
-                        plt.close(fig)
+                        # fig = plt.figure(figsize=(size.shape[0] / 50 * 1.5, 3))
+                        # plt.scatter(np.arange(size.shape[0]) / 50, size, s=1)
+                        # ylim = plt.ylim()
+                        # for s in systole:
+                        #     plt.plot(np.array([s, s]) / 50, ylim, linewidth=1)
+                        # plt.ylim(ylim)
+                        # plt.title(os.path.splitext(filename)[0])
+                        # plt.xlabel("Seconds")
+                        # plt.ylabel("Size (pixels)")
+                        # plt.tight_layout()
+                        # plt.savefig(os.path.join(output, "size",os.path.splitext(filename)[0] + ".pdf"))
+                        # plt.close(fig)
 
                         # Normalize size to [0, 1]
                         size -= size.min()
@@ -323,6 +406,9 @@ def run(
                             if f in systole:
                                 # If frame is computer-selected systole, mark with a line
                                 video[:, :, 115:224, int(round(f / len(size) * 200 + 10))] = 255.
+                            if f in diastole:
+                                # If frame is computer-selected systole, mark with a line
+                                video[:, :, 115:224, int(round(f / len(size) * 200 + 10))] = 100.
 
                             def dash(start, stop, on=10, off=10):
                                 buf = []
@@ -482,7 +568,8 @@ def _video_collate_fn(x):
     # ``target'' is also a tuple of length ``batch_size''
     # Each element is a tuple of the targets for the item.
 
-    i = list(map(lambda t: t.shape[1], video))  # Extract lengths of videos in frames
+    # Extract lengths of videos in frames
+    i = list(map(lambda t: t.shape[1], video))
 
     # This contatenates the videos along the the frames dimension (basically
     # playing the videos one after another). The frames dimension is then
@@ -496,3 +583,7 @@ def _video_collate_fn(x):
     target = zip(*target)
 
     return video, target, i
+
+
+if __name__ == '__main__':
+    run()

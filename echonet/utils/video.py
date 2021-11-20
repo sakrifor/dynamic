@@ -359,3 +359,7 @@ def run_epoch(model, dataloader, train, optim, device, save_all=False, block_siz
     y = np.concatenate(y)
 
     return total / n, yhat, y
+
+
+if __name__ == '__main__':
+    run()
